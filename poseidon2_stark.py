@@ -41,6 +41,7 @@ def mk_poseidon2_proof(inp, steps):
     assert steps <= 2**32 // extension_factor
     assert is_a_power_of_2(steps)
 
+    # Total Size of the evaluation domain
     precision = steps * extension_factor
 
     # Root of unity such that x^precision=1
