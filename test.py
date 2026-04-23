@@ -51,6 +51,7 @@ def test_stark():
     from poseidon2_stark import poseidon2_full_state
     final_state = poseidon2_full_state(INPUT, 2**LOGSTEPS - 1)
     output = final_state[0]
+    print(f"Debug Output: {output}")
     assert verify_poseidon2_proof(INPUT, 2**LOGSTEPS, output, proof)
 
 if __name__ == '__main__':

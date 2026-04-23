@@ -39,21 +39,6 @@ ROUND_CONSTANTS = [
 	1873351758,
 	1249254749,
 	656656135,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
-	0,
 	1215211643,
 	2058118293,
 	265689576,
@@ -128,11 +113,6 @@ MATRIX_PARTIAL = [
 def mat_vec_mul(matrix: list[list[int]], vector: list[int], modulus: int) -> list[int]:
 	return [sum((a * b) % modulus for a, b in zip(row, vector)) % modulus for row in matrix]
 
-#Round constants
-def _add_round_constants(state: list[int], rc_iter, modulus: int) -> None:
-	for i in range(len(state)):
-		state[i] = (state[i] + next(rc_iter)) % modulus
-
 def poseidon2(
 	state: list[int], rc: list[int], matrix_full: list[list[int]], matrix_partial: list[list[int]],
 	modulus: int, rf: int, rp: int, alpha: int,
@@ -145,13 +125,14 @@ def poseidon2(
 	rc_iter = iter(rc)
 	
 	def full_round() -> None:
-		_add_round_constants(state_words, rc_iter, modulus)
+		for i in range(len(state_words)):
+			state_words[i] = (state_words[i] + next(rc_iter)) % modulus
 		for i in range(t): #iteration of non-linear component
 			state_words[i] = pow(state_words[i], alpha, modulus) 
 		state_words[:] = mat_vec_mul(matrix_full, state_words, modulus)
 
 	def partial_round() -> None:
-		_add_round_constants(state_words, rc_iter, modulus)
+		state_words[0] = (state_words[0] + next(rc_iter)) % modulus
 		state_words[0] = pow(state_words[0], alpha, modulus)
 		state_words[:] = mat_vec_mul(matrix_partial, state_words, modulus)
 	

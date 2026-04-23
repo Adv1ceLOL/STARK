@@ -4,7 +4,7 @@ import time
 from fft import fft
 from fri import prove_low_degree, verify_low_degree_proof
 from utils import get_power_cycle, get_pseudorandom_indices, is_a_power_of_2
-from poseidon2 import poseidon2, ROUND_CONSTANTS, MATRIX_FULL, MATRIX_PARTIAL, DEFAULT_RF, DEFAULT_RP, DEFAULT_ALPHA, P
+from poseidon2 import poseidon2, ROUND_CONSTANTS, MATRIX_FULL, MATRIX_PARTIAL, DEFAULT_RF, DEFAULT_RP, DEFAULT_ALPHA, P, mat_vec_mul
 
 # Single modulus for all operations (Koala modulus)
 modulus = 2**31 - 2**24 + 1
@@ -21,17 +21,34 @@ def poseidon2_full_state(scalar_val, steps):
     Returns the full 16-element state after all steps.
     All operations in koala modulus."""
     state = [scalar_val % modulus, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    
+    rounds_per_hash = DEFAULT_RF + DEFAULT_RP
+    half_rf = DEFAULT_RF // 2
+
+    rc_idx = 0
     for i in range(steps):
-        state = poseidon2(
-            state=state,
-            rc=ROUND_CONSTANTS,
-            matrix_full=MATRIX_FULL,
-            matrix_partial=MATRIX_PARTIAL,
-            modulus=modulus,
-            rf=DEFAULT_RF,
-            rp=DEFAULT_RP,
-            alpha=DEFAULT_ALPHA,
-        )
+        round_idx = i % rounds_per_hash
+        
+        if round_idx == 0:
+            rc_idx = 0
+
+        is_full = True if (round_idx < half_rf or round_idx >= half_rf + DEFAULT_RP) else False
+        
+        if is_full:
+            # Apply round constants to all 16 elements
+            for j in range(16):
+                state[j] = (state[j] + ROUND_CONSTANTS[rc_idx]) % modulus
+                rc_idx += 1
+            for j in range(16):
+                state[j] = pow(state[j], DEFAULT_ALPHA, modulus)
+            state = mat_vec_mul(MATRIX_FULL, state, modulus)
+        else:
+            # Apply round constant ONLY to first element
+            state[0] = (state[0] + ROUND_CONSTANTS[rc_idx]) % modulus
+            rc_idx += 1
+            state[0] = pow(state[0], DEFAULT_ALPHA, modulus)
+            state = mat_vec_mul(MATRIX_PARTIAL, state, modulus)
+            
     return state
 
 # Generate a STARK for a Poseidon2 calculation
@@ -55,6 +72,41 @@ def mk_poseidon2_proof(inp, steps):
     xs = get_power_cycle(G2, modulus)
     last_step_position = xs[(steps-1)*extension_factor]
 
+    # Generate public polynomials for selectors and round constants
+    s_full_trace = []
+    rc_traces = [[] for _ in range(16)]
+    
+    rounds_per_hash = DEFAULT_RF + DEFAULT_RP
+    half_rf = DEFAULT_RF // 2
+    
+    rc_idx = 0
+    for i in range(steps):
+        round_idx = i % rounds_per_hash
+        is_full = 1 if (round_idx < half_rf or round_idx >= half_rf + DEFAULT_RP) else 0
+        s_full_trace.append(is_full)
+        for j in range(16):
+            if is_full:
+                rc_traces[j].append(ROUND_CONSTANTS[rc_idx])
+                rc_idx += 1
+            else:
+                if j == 0:
+                    rc_traces[j].append(ROUND_CONSTANTS[rc_idx])
+                    rc_idx += 1
+                else:
+                    rc_traces[j].append(0)
+        
+        # Reset rc_idx for the next hash if we wrapped around
+        if round_idx == rounds_per_hash - 1:
+            rc_idx = 0
+
+    s_full_poly = fft(s_full_trace, modulus, G1, inv=True)
+    s_full_evals = fft(s_full_poly, modulus, G2)
+    
+    rc_polys = [fft(rc_traces[j], modulus, G1, inv=True) for j in range(16)]
+    rc_evals = [fft(rc_polys[j], modulus, G2) for j in range(16)]
+    
+    print('Generated Selector and Round Constant polynomials (Public)')
+
     # Generate the computational trace: 16 x steps matrix
     # trace[step_index][state_element_index] = value of that state element at that step
     # step i corresponds to the state after applying Poseidon2 permutation i times
@@ -62,16 +114,17 @@ def mk_poseidon2_proof(inp, steps):
     current_state = [inp % modulus, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     computational_trace.append(list(current_state))  # step 0: initial state (0 applications)
     for i in range(steps - 1):  # Apply permutation steps-1 times to get steps entries total
-        current_state = poseidon2(
-            state=current_state,
-            rc=ROUND_CONSTANTS,
-            matrix_full=MATRIX_FULL,
-            matrix_partial=MATRIX_PARTIAL,
-            modulus=modulus,
-            rf=DEFAULT_RF,
-            rp=DEFAULT_RP,
-            alpha=DEFAULT_ALPHA,
-        )
+        round_idx = i % rounds_per_hash
+        is_full = 1 if (round_idx < half_rf or round_idx >= half_rf + DEFAULT_RP) else 0
+        
+        current_state = [(current_state[j] + rc_traces[j][i]) % modulus for j in range(16)]
+        if is_full:
+            current_state = [pow(x, DEFAULT_ALPHA, modulus) for x in current_state]
+            current_state = mat_vec_mul(MATRIX_FULL, current_state, modulus)
+        else:
+            current_state[0] = pow(current_state[0], DEFAULT_ALPHA, modulus)
+            current_state = mat_vec_mul(MATRIX_PARTIAL, current_state, modulus)
+            
         computational_trace.append(list(current_state))
     
     # Extract input and output states
@@ -98,14 +151,29 @@ def mk_poseidon2_proof(inp, steps):
     
     print('Converted 16-column computational trace into polynomials and low-degree extended them')
 
-    # Compute the 16 composed polynomials C_j such that
-    # C_j(P_j(x), P_j(g1*x)) = P_j(g1*x) - P_j(x) for each state element j
+    # Compute the 16 composed polynomials C_j
     c_evaluations_list = []
+
     for j in range(16):
-        c_j_evals = [(p_evaluations_list[j][(i+extension_factor)%precision] -
-                      p_evaluations_list[j][i]) % modulus
-                     for i in range(precision)]
+        c_j_evals = []
+        for i in range(precision):
+            s_f = s_full_evals[i]
+            
+            state_plus_rc = [(p_evaluations_list[k][i] + rc_evals[k][i]) % modulus for k in range(16)]
+            sbox_state = [pow(state_plus_rc[0], DEFAULT_ALPHA, modulus)] + [
+                (pow(state_plus_rc[k], DEFAULT_ALPHA, modulus) * s_f + state_plus_rc[k] * (1 - s_f)) % modulus
+                for k in range(1, 16)
+            ]
+            
+            mat_full_res = sum(MATRIX_FULL[j][k] * sbox_state[k] for k in range(16)) % modulus
+            mat_partial_res = sum(MATRIX_PARTIAL[j][k] * sbox_state[k] for k in range(16)) % modulus
+            
+            p_next_calculated = (mat_full_res * s_f + mat_partial_res * (1 - s_f)) % modulus
+            
+            next_p_j = p_evaluations_list[j][(i + extension_factor) % precision]
+            c_j_evals.append((next_p_j - p_next_calculated) % modulus)
         c_evaluations_list.append(c_j_evals)
+        
     print('Computed 16 transition constraint polynomials')
 
     # Compute D(x) = (sum of C_j(x) weighted by random coefficients) / Z(x)
@@ -214,21 +282,59 @@ def mk_poseidon2_proof(inp, steps):
     samples = spot_check_security_factor
     positions = get_pseudorandom_indices(l_mtree[1], precision, samples,
                                          exclude_multiples_of=extension_factor)
-    augmented_positions = sum([[x, (x + skips) % precision] for x in positions], [])
+    curr_next_positions = sum([[x, (x + skips) % precision] for x in positions], [])
     print('Computed %d spot checks' % samples)
 
     # Return the Merkle roots of P and D, the spot check Merkle proofs,
     # and low-degree proofs of P and D
     o = [mtree[1],
          l_mtree[1],
-         mk_multi_branch(mtree, augmented_positions),
+         mk_multi_branch(mtree, curr_next_positions),
          mk_multi_branch(l_mtree, positions),
-         prove_low_degree(l_evaluations, G2, steps * 2, modulus, exclude_multiples_of=extension_factor)]
+         prove_low_degree(l_evaluations, G2, steps * 4, modulus, exclude_multiples_of=extension_factor)]
     print("Poseidon2 STARK computed in %.4f sec" % (time.time() - start_time))
     return o
 
 # Verifies a Poseidon2 STARK
 def verify_poseidon2_proof(inp, steps, output, proof):
+    import time
+    from utils import get_power_cycle, get_pseudorandom_indices, is_a_power_of_2
+    
+    rounds_per_hash = DEFAULT_RF + DEFAULT_RP
+    half_rf = DEFAULT_RF // 2
+    
+    # Since public polynomial we do tehm again here
+    precision = steps * extension_factor
+    G2 = f.exp(nonresidue, (modulus-1)//precision)
+    skips = precision // steps
+    G1 = f.exp(G2, skips)
+
+    s_full_trace = []
+    rc_traces = [[] for _ in range(16)]
+    
+    rc_idx = 0
+    for i in range(steps):
+        round_idx = i % rounds_per_hash
+        is_full = 1 if (round_idx < half_rf or round_idx >= half_rf + DEFAULT_RP) else 0
+        s_full_trace.append(is_full)
+        for j in range(16):
+            if is_full:
+                rc_traces[j].append(ROUND_CONSTANTS[rc_idx])
+                rc_idx += 1
+            else:
+                if j == 0:
+                    rc_traces[j].append(ROUND_CONSTANTS[rc_idx])
+                    rc_idx += 1
+                else:
+                    rc_traces[j].append(0)
+        
+        # Reset rc_idx for the next hash if we wrapped around
+        if round_idx == rounds_per_hash - 1:
+            rc_idx = 0
+
+    s_full_poly = fft(s_full_trace, modulus, G1, inv=True)
+    rc_polys = [fft(rc_traces[j], modulus, G1, inv=True) for j in range(16)]
+    
     m_root, l_root, main_branches, linear_comb_branches, fri_proof = proof
     start_time = time.time()
     assert steps <= 2**32 // extension_factor
@@ -244,25 +350,23 @@ def verify_poseidon2_proof(inp, steps, output, proof):
     # For 16-column STARK, we verify the full state
     computed_state = [inp % modulus, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     for i in range(steps - 1):
-        computed_state = poseidon2(
-            state=computed_state,
-            rc=ROUND_CONSTANTS,
-            matrix_full=MATRIX_FULL,
-            matrix_partial=MATRIX_PARTIAL,
-            modulus=modulus,
-            rf=DEFAULT_RF,
-            rp=DEFAULT_RP,
-            alpha=DEFAULT_ALPHA,
-        )
+        round_idx = i % rounds_per_hash
+        is_full = 1 if (round_idx < half_rf or round_idx >= half_rf + DEFAULT_RP) else 0
+        
+        computed_state = [(computed_state[j] + rc_traces[j][i]) % modulus for j in range(16)]
+        if is_full:
+            computed_state = [pow(x, DEFAULT_ALPHA, modulus) for x in computed_state]
+            computed_state = mat_vec_mul(MATRIX_FULL, computed_state, modulus)
+        else:
+            computed_state[0] = pow(computed_state[0], DEFAULT_ALPHA, modulus)
+            computed_state = mat_vec_mul(MATRIX_PARTIAL, computed_state, modulus)
+
     assert computed_state[0] == output, "Poseidon2 output mismatch"
     print('Verified Poseidon2 computation')
 
-    # Attempt FRI verification (may not be perfectly low-degree since Poseidon2 isn't polynomial)
-    try:
-        verify_low_degree_proof(l_root, G2, fri_proof, steps * 2, modulus, exclude_multiples_of=extension_factor)
-        print('FRI verification passed')
-    except AssertionError as e:
-        print('Note: FRI verification not applicable')
+    # Attempt FRI verification 
+    verify_low_degree_proof(l_root, G2, fri_proof, steps * 4, modulus, exclude_multiples_of=extension_factor)
+    print('FRI verification passed')
 
     # Performs the spot checks
     # Derive random coefficients deterministically from input and steps (same as prover)
@@ -279,9 +383,9 @@ def verify_poseidon2_proof(inp, steps, output, proof):
     samples = spot_check_security_factor
     positions = get_pseudorandom_indices(l_root, precision, samples,
                                          exclude_multiples_of=extension_factor)
-    augmented_positions = sum([[x, (x + skips) % precision] for x in positions], [])
+    curr_next_positions = sum([[x, (x + skips) % precision] for x in positions], [])
     last_step_position = f.exp(G2, (steps - 1) * skips)
-    main_branch_leaves = verify_multi_branch(m_root, augmented_positions, main_branches)
+    main_branch_leaves = verify_multi_branch(m_root, curr_next_positions, main_branches)
     linear_comb_branch_leaves = verify_multi_branch(l_root, positions, linear_comb_branches)
     
     for i, pos in enumerate(positions):
@@ -302,18 +406,28 @@ def verify_poseidon2_proof(inp, steps, output, proof):
                        x - last_step_position)
 
         # Check transition constraints for all 16 columns
-        # For each column j: P_j(g1*x) - P_j(x) must equal the j-th component of Z(x)*D(x)
+        s_f = f.eval_poly_at(s_full_poly, x)
+        rcs = [f.eval_poly_at(rc_polys[k], x) for k in range(16)]
+        
+        state_plus_rc = [(p_of_x[k] + rcs[k]) % modulus for k in range(16)]
+        sbox_state = [pow(state_plus_rc[0], DEFAULT_ALPHA, modulus)] + [(pow(state_plus_rc[k], DEFAULT_ALPHA, modulus) * s_f + state_plus_rc[k] * (1 - s_f)) % modulus for k in range(1, 16)]
+        
+        mat_full_res = sum(MATRIX_FULL[0][k] * sbox_state[k] for k in range(16)) % modulus
+        mat_partial_res = sum(MATRIX_PARTIAL[0][k] * sbox_state[k] for k in range(16)) % modulus
+        
         d_sum = 0
+
         for j in range(16):
-            c_j_contribution = (p_of_next[j] - p_of_x[j]) % modulus
+            p_next_calculated = (mat_full_res * s_f + mat_partial_res * (1 - s_f)) % modulus
+            c_j_contribution = (p_of_next[j] - p_next_calculated) % modulus
             d_sum = (d_sum + c_j_contribution * k_c[j]) % modulus
+            
+            if j < 15:
+                mat_full_res = sum(MATRIX_FULL[j+1][k] * sbox_state[k] for k in range(16)) % modulus
+                mat_partial_res = sum(MATRIX_PARTIAL[j+1][k] * sbox_state[k] for k in range(16)) % modulus
         
         # Verify: sum of (P_j(g1*x) - P_j(x)) * k_c[j] = Z(x) * D(x)
         assert (d_sum - zvalue * d_of_x) % modulus == 0, f"Transition constraint failed at position {pos}"
-
-        # Note: Boundary constraints are ensured by verifying the actual Poseidon2 computation
-        # and the transition constraints. The combined B polynomial structure prevents individual
-        # boundary constraint verification in the spot checks, but the overall STARK is sound.
 
         # Check correctness of the linear combination
         p_sum = sum(p_of_x[j] * k_p[j] for j in range(16)) % modulus
