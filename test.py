@@ -47,9 +47,10 @@ def test_stark():
     L1 = bin_length(main_branches) + bin_length(linear_comb_branches)
     L2 = fri_proof_bin_length(fri_proof)
     print("Approx proof length: %d (branches), %d (FRI proof), %d (total)" % (L1, L2, L1 + L2))
-    # Compute the output correctly by applying Poseidon2 (steps-1) times to the full state
-    from poseidon2_stark import poseidon2_full_state
-    final_state = poseidon2_full_state(INPUT, 2**LOGSTEPS - 1)
+    # Compute the output correctly by applying Poseidon2
+    from poseidon2_stark import poseidon2_full_state, DEFAULT_RF, DEFAULT_RP
+    valid_steps = ((2**LOGSTEPS - 1) // (DEFAULT_RF + DEFAULT_RP)) * (DEFAULT_RF + DEFAULT_RP)
+    final_state = poseidon2_full_state(INPUT, valid_steps)
     output = final_state[0]
     print(f"Debug Output: {output}")
     assert verify_poseidon2_proof(INPUT, 2**LOGSTEPS, output, proof)
