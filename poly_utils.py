@@ -49,11 +49,10 @@ class PrimeField():
     # Evaluate a polynomial at a point
     def eval_poly_at(self, p, x):
         y = 0
-        power_of_x = 1
-        for i, p_coeff in enumerate(p):
-            y += power_of_x * p_coeff
-            power_of_x = (power_of_x * x) % self.modulus
-        return y % self.modulus
+        m = self.modulus
+        for p_coeff in reversed(p):
+            y = (y * x + p_coeff) % m
+        return y
         
     # Arithmetic for polynomials
     def add_polys(self, a, b):

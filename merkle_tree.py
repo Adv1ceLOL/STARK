@@ -38,34 +38,35 @@ def mk_multi_branch(tree, indices):
     # Branches we are outputting
     output = []
     # Elements in the tree we can get from the branches themselves
-    calculable_indices = {}
+    calculable_indices = set()
     for i in indices:
         new_branch = mk_branch(tree, i)
         index = len(tree) // 2 + i
-        calculable_indices[index] = True
+        calculable_indices.add(index)
         for j in range(1, len(new_branch)):
-            calculable_indices[index ^ 1] = True
+            calculable_indices.add(index ^ 1)
             index //= 2
         output.append(new_branch)
+        
     # Fill in the calculable list: if we can get or calculate both children, we can calculate the parent
-    complete = False
-    while not complete:
-        complete = True
-        keys = sorted([x//2 for x in calculable_indices])[::-1]
-        for k in keys:
-            if k*2 in calculable_indices and (k*2)+1 in calculable_indices and k not in calculable_indices:
-                calculable_indices[k] = True
-                complete = False
+    # Process bottom up
+    if calculable_indices:
+        max_idx = max(calculable_indices)
+        for k in range(max_idx // 2, 0, -1):
+            if (k * 2) in calculable_indices and (k * 2) + 1 in calculable_indices:
+                calculable_indices.add(k)
+
     # If for any branch node both children are calculable, or the node overlaps with a leaf, or the node
     # overlaps with a previously calculated one, elide it
-    scanned = {}
+    scanned = set()
     for i, b in zip(indices, output):
         index = len(tree) // 2 + i
-        scanned[index] = True
+        scanned.add(index)
         for j in range(1, len(b)):
-            if ((index^1)*2 in calculable_indices and (index^1)*2+1 in calculable_indices) or ((index^1)-len(tree)//2 in indices) or (index^1) in scanned:
+            sibling = index ^ 1
+            if (sibling * 2 in calculable_indices and sibling * 2 + 1 in calculable_indices) or (sibling - len(tree)//2 in indices) or (sibling in scanned):
                 b[j] = b''
-            scanned[index^1] = True
+            scanned.add(sibling)
             index //= 2
     return output
 

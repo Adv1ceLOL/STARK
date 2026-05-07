@@ -53,8 +53,12 @@ def poseidon2_full_state(scalar_val, steps):
     return state
 
 # Generate a STARK for a Poseidon2 calculation
-def mk_poseidon2_proof(inp, steps):
+def mk_poseidon2_proof(inp, steps, verbose_timing=False, track_fft=False):
     start_time = time.time()
+    timings = {} if verbose_timing else None
+    phase_start = start_time
+    fft_stats = {'operations': [], 'total_ops': 0} if track_fft else None
+
     # Some constraints to make our job easier
     assert steps <= 2**32 // extension_factor
     assert is_a_power_of_2(steps)
@@ -105,12 +109,23 @@ def mk_poseidon2_proof(inp, steps):
         rc_inv_futures = [executor.submit(fft, rc_traces[j], modulus, G1, True) for j in range(16)]
         s_full_poly = s_inv_future.result()
         rc_polys = [f.result() for f in rc_inv_futures]
-        
+
         s_fwd_future = executor.submit(fft, s_full_poly, modulus, G2, False)
         rc_fwd_futures = [executor.submit(fft, rc_polys[j], modulus, G2, False) for j in range(16)]
         s_full_evals = s_fwd_future.result()
         rc_evals = [f.result() for f in rc_fwd_futures]
-    
+
+    if track_fft:
+        fft_stats['operations'].extend([
+            {'phase': 'selector_rc', 'type': 'inverse', 'size': len(s_full_trace), 'count': 1},
+            {'phase': 'selector_rc', 'type': 'inverse', 'size': len(rc_traces[0]), 'count': 16},
+            {'phase': 'selector_rc', 'type': 'forward', 'size': len(s_full_poly), 'count': 1},
+            {'phase': 'selector_rc', 'type': 'forward', 'size': len(rc_polys[0]), 'count': 16},
+        ])
+        fft_stats['total_ops'] += 34
+    if verbose_timing:
+        timings['selector_rc_poly'] = time.time() - phase_start
+        phase_start = time.time()
     print('Generated Selector and Round Constant polynomials (Public)')
 
     # Generate the computational trace: 16 x steps matrix
@@ -139,7 +154,10 @@ def mk_poseidon2_proof(inp, steps):
     
     valid_steps = ((steps - 1) // rounds_per_hash) * rounds_per_hash
     output_state = computational_trace[valid_steps]
-    
+
+    if verbose_timing:
+        timings['computational_trace'] = time.time() - phase_start
+        phase_start = time.time()
     print('Done generating poseidon computational trace (16-column)')
 
     # Interpolate each of the 16 state element columns into a polynomial
@@ -155,7 +173,16 @@ def mk_poseidon2_proof(inp, steps):
         # Low-degree extend over the larger domain G2
         p_fwd_futures = [executor.submit(fft, p_polynomials[j], modulus, G2, False) for j in range(16)]
         p_evaluations_list = [f.result() for f in p_fwd_futures]
-    
+
+    if track_fft:
+        fft_stats['operations'].extend([
+            {'phase': 'trace_interpolation', 'type': 'inverse', 'size': steps, 'count': 16},
+            {'phase': 'trace_interpolation', 'type': 'forward', 'size': steps, 'count': 16},
+        ])
+        fft_stats['total_ops'] += 32
+    if verbose_timing:
+        timings['trace_interpolation'] = time.time() - phase_start
+        phase_start = time.time()
     print('Converted 16-column computational trace into polynomials and low-degree extended them')
 
     # Compute the 16 composed polynomials C_j
@@ -172,10 +199,13 @@ def mk_poseidon2_proof(inp, steps):
             mat_partial_res = sum(MATRIX_PARTIAL[j][k] * sbox_state[k] for k in range(16)) % modulus
             
             p_next_calculated = (mat_full_res * s_f + mat_partial_res * (1 - s_f)) % modulus
-            
+
             next_p_j = p_evaluations_list[j][(i + extension_factor) % precision]
             c_evaluations_list[j].append((next_p_j - p_next_calculated) % modulus)
-        
+
+    if verbose_timing:
+        timings['transition_constraints'] = time.time() - phase_start
+        phase_start = time.time()
     print('Computed 16 transition constraint polynomials')
 
     # Compute D(x) = (sum of C_j(x) weighted by random coefficients) / Z(x)
@@ -216,7 +246,10 @@ def mk_poseidon2_proof(inp, steps):
         b_j_evals = [((p_evaluations_list[j][i] - i_j_evaluations[i]) * inv_z2_evaluations[i]) % modulus
                      for i in range(precision)]
         b_evaluations_list.append(b_j_evals)
-    
+
+    if verbose_timing:
+        timings['boundary_constraints'] = time.time() - phase_start
+        phase_start = time.time()
     print('Computed 16 boundary constraint polynomials (B)')
 
     # Compute D and B via weighted combination of their 16 components
@@ -241,7 +274,10 @@ def mk_poseidon2_proof(inp, steps):
     b_evaluations = [0] * precision
     for i in range(precision):
         b_evaluations[i] = sum(b_evaluations_list[j][i] * k_b[j] for j in range(16)) % modulus
-    
+
+    if verbose_timing:
+        timings['weighted_combination'] = time.time() - phase_start
+        phase_start = time.time()
     print('Computed D and B polynomials via weighted combination')
     
     # Now build the final Merkle tree with all components: 16 P + B + D
@@ -249,6 +285,9 @@ def mk_poseidon2_proof(inp, steps):
                        b_evaluations[i].to_bytes(32, 'big') +
                        d_evaluations[i].to_bytes(32, 'big')
                        for i in range(precision)])
+    if verbose_timing:
+        timings['merkle_tree'] = time.time() - phase_start
+        phase_start = time.time()
     print('Computed hash root')
 
     # Based on the hashes of P, D and B, we select a random linear combination
@@ -279,6 +318,9 @@ def mk_poseidon2_proof(inp, steps):
                             b_evaluations[i] * k3 + b_evaluations[i] * powers[i] * k4) % modulus
 
     l_mtree = merkelize([val.to_bytes(32, 'big') for val in l_evaluations])
+    if verbose_timing:
+        timings['linear_combination'] = time.time() - phase_start
+        phase_start = time.time()
     print('Computed random linear combination')
 
     # Do some spot checks of the Merkle tree at pseudo-random coordinates, excluding
@@ -292,12 +334,26 @@ def mk_poseidon2_proof(inp, steps):
 
     # Return the Merkle roots of P and D, the spot check Merkle proofs,
     # and low-degree proofs of P and D
+    fri_start = time.time() if verbose_timing else None
+    fri_proof = prove_low_degree(l_evaluations, G2, steps * 4, modulus, exclude_multiples_of=extension_factor)
+    if verbose_timing:
+        timings['fri_proof'] = time.time() - fri_start
+
     o = [mtree[1],
          l_mtree[1],
          mk_multi_branch(mtree, curr_next_positions),
          mk_multi_branch(l_mtree, positions),
-         prove_low_degree(l_evaluations, G2, steps * 4, modulus, exclude_multiples_of=extension_factor)]
-    print("Poseidon2 STARK computed in %.4f sec" % (time.time() - start_time))
+         fri_proof]
+
+    total_time = time.time() - start_time
+    if verbose_timing:
+        timings['total'] = total_time
+        if track_fft:
+            return o, timings, fft_stats
+        return o, timings
+    if track_fft:
+        return o, fft_stats
+    print("Poseidon2 STARK computed in %.4f sec" % total_time)
     return o
 
 # Verifies a Poseidon2 STARK
