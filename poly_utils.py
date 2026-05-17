@@ -5,8 +5,20 @@ class PrimeField():
         assert pow(2, modulus, modulus) == 2
         self.modulus = modulus
 
+    def zero(self):
+        return 0
+
+    def one(self):
+        return 1
+
     def __repr__(self):
         return (f"PrimeField(modulus={self.modulus})")
+
+    def zero(self):
+        return 0
+
+    def one(self):
+        return 1
 
     def add(self, x, y):
         return (x+y) % self.modulus
@@ -198,12 +210,101 @@ class PrimeField():
             invtargets.extend([e0, e1, e2, e3])
         invalls = self.multi_inv(invtargets)
         o = []
-        for (i, (ys, eq0, eq1, eq2, eq3)) in enumerate(data):
-            invallz = invalls[i*4:i*4+4]
-            inv_y0 = ys[0] * invallz[0] % m
-            inv_y1 = ys[1] * invallz[1] % m
-            inv_y2 = ys[2] * invallz[2] % m
-            inv_y3 = ys[3] * invallz[3] % m
-            o.append([(eq0[i] * inv_y0 + eq1[i] * inv_y1 + eq2[i] * inv_y2 + eq3[i] * inv_y3) % m for i in range(4)])
-        # assert o == [self.lagrange_interp_4(xs, ys) for xs, ys in zip(xsets, ysets)]
-        return o
+
+class ExtensionField:
+    def __init__(self, modulus):
+        self.modulus = modulus
+
+    def zero(self):
+        return (0, 0)
+
+    def one(self):
+        return (1, 0)
+
+    def add(self, x, y):
+        return ((x[0] + y[0]) % self.modulus, (x[1] + y[1]) % self.modulus)
+
+    def sub(self, x, y):
+        return ((x[0] - y[0]) % self.modulus, (x[1] - y[1]) % self.modulus)
+
+    def mul(self, x, y):
+        a, b = x
+        c, d = y
+        return ((a * c - b * d) % self.modulus, (a * d + b * c) % self.modulus)
+
+    def exp(self, base, exponent):
+        result = (1, 0)
+        current = base
+        while exponent > 0:
+            if exponent % 2 == 1:
+                result = self.mul(result, current)
+            current = self.mul(current, current)
+            exponent //= 2
+        return result
+
+    def inv(self, x):
+        a, b = x
+        den = (a * a + b * b) % self.modulus
+        den_inv = pow(den, self.modulus - 2, self.modulus)
+        if hasattr(self, 'div'): # avoid cyclic
+            pass
+        return ((a * den_inv) % self.modulus, (-b * den_inv) % self.modulus)
+
+    def div(self, x, y):
+        return self.mul(x, self.inv(y))
+
+    def multi_inv(self, values):
+        partials = [(1, 0)]
+        for v in values:
+            partials.append(self.mul(partials[-1], v))
+        inv_total = self.inv(partials[-1])
+        res = [(0, 0)] * len(values)
+        for i in range(len(values) - 1, -1, -1):
+            res[i] = self.mul(inv_total, partials[i])
+            inv_total = self.mul(inv_total, values[i])
+        return res
+
+    def add_polys(self, a, b):
+        length = max(len(a), len(b))
+        a_padded = a + [(0, 0)] * (length - len(a))
+        b_padded = b + [(0, 0)] * (length - len(b))
+        return [self.add(a_padded[i], b_padded[i]) for i in range(length)]
+
+    def sub_polys(self, a, b):
+        length = max(len(a), len(b))
+        a_padded = a + [(0, 0)] * (length - len(a))
+        b_padded = b + [(0, 0)] * (length - len(b))
+        return [self.sub(a_padded[i], b_padded[i]) for i in range(length)]
+
+    def mul_by_const(self, a, c):
+        return [self.mul(x, c) for x in a]
+
+    def mul_polys(self, a, b):
+        if not a or not b:
+            return [(0, 0)]
+        res = [(0, 0)] * (len(a) + len(b) - 1)
+        for i, ca in enumerate(a):
+            for j, cb in enumerate(b):
+                res[i + j] = self.add(res[i + j], self.mul(ca, cb))
+        while len(res) > 1 and res[-1] == (0, 0):
+            res.pop()
+        return res
+
+    def eval_poly_at(self, p, x):
+        y = self.zero()
+        for coeff in reversed(p):
+            y = self.add(self.mul(y, x), coeff)
+        return y
+
+    def lagrange_interp_2(self, xs, ys):
+        # Lagrange interpolation for 2 points in extension field
+        eq0 = [self.sub(self.zero(), xs[1]), self.one()]
+        eq1 = [self.sub(self.zero(), xs[0]), self.one()]
+        e0 = self.eval_poly_at(eq0, xs[0])
+        e1 = self.eval_poly_at(eq1, xs[1])
+        invall = self.inv(self.mul(e0, e1))
+        inv_y0 = self.mul(self.mul(ys[0], invall), e1)
+        inv_y1 = self.mul(self.mul(ys[1], invall), e0)
+        return [self.add(self.mul(eq0[i] if isinstance(eq0[i], tuple) else (eq0[i], 0), inv_y0), 
+                         self.mul(eq1[i] if isinstance(eq1[i], tuple) else (eq1[i], 0), inv_y1)) for i in range(2)]
+

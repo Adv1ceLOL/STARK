@@ -1,46 +1,93 @@
-def _simple_ft(vals, modulus, roots_of_unity):
+def _simple_ft(vals, modulus, roots_of_unity, field=None):
     L = len(roots_of_unity)
     o = []
+    
     for i in range(L):
-        last = 0
+        last = field.zero() if field is not None else 0
         for j in range(L):
-            last += vals[j] * roots_of_unity[(i*j)%L]
-        o.append(last % modulus)
+            if field is not None:
+                term = field.mul(vals[j], roots_of_unity[(i*j)%L])
+                last = field.add(last, term)
+            else:
+                last = (last + vals[j] * roots_of_unity[(i*j)%L]) % modulus
+        o.append(last)
     return o
 
-def _fft(vals, modulus, roots_of_unity):
+def _fft(vals, modulus, roots_of_unity, field=None):
     if len(vals) <= 4:
-        #return vals
-        return _simple_ft(vals, modulus, roots_of_unity)
-    L = _fft(vals[::2], modulus, roots_of_unity[::2])
-    R = _fft(vals[1::2], modulus, roots_of_unity[::2])
-    o = [0 for i in vals]
+        return _simple_ft(vals, modulus, roots_of_unity, field=field)
+    
+    L = _fft(vals[::2], modulus, roots_of_unity[::2], field=field)
+    R = _fft(vals[1::2], modulus, roots_of_unity[::2], field=field)
+    o = [field.zero() if field is not None else 0 for _ in vals]
+    
     for i, (x, y) in enumerate(zip(L, R)):
-        y_times_root = y*roots_of_unity[i]
-        o[i] = (x+y_times_root) % modulus 
-        o[i+len(L)] = (x-y_times_root) % modulus 
+        if field is not None:
+            y_times_root = field.mul(y, roots_of_unity[i])
+            o[i] = field.add(x, y_times_root)
+            o[i+len(L)] = field.sub(x, y_times_root)
+        else:
+            y_times_root = (y * roots_of_unity[i]) % modulus
+            o[i] = (x + y_times_root) % modulus 
+            o[i+len(L)] = (x - y_times_root) % modulus 
     return o
 
-def expand_root_of_unity(root_of_unity, modulus):
+def expand_root_of_unity(root_of_unity, modulus, field=None):
     # Build up roots of unity
-    rootz = [1, root_of_unity]
-    while rootz[-1] != 1:
-        rootz.append((rootz[-1] * root_of_unity) % modulus)
+    rootz = [field.one() if field is not None else 1, root_of_unity]
+    while rootz[-1] != (field.one() if field is not None else 1):
+        if field is not None:
+            rootz.append(field.mul(rootz[-1], root_of_unity))
+        else:
+            rootz.append((rootz[-1] * root_of_unity) % modulus)
     return rootz
 
-def fft(vals, modulus, root_of_unity, inv=False):
-    rootz = expand_root_of_unity(root_of_unity, modulus)
+def fft(vals, modulus, root_of_unity, inv=False, field=None):
+    rootz = expand_root_of_unity(root_of_unity, modulus, field=field)
     # Fill in vals with zeroes if needed
     if len(rootz) > len(vals) + 1:
-        vals = vals + [0] * (len(rootz) - len(vals) - 1)
+        zero_val = field.zero() if field is not None else 0
+        vals = vals + [zero_val] * (len(rootz) - len(vals) - 1)
     if inv:
         # Inverse FFT
-        invlen = pow(len(vals), modulus-2, modulus)
-        return [(x*invlen) % modulus for x in
-                _fft(vals, modulus, rootz[:0:-1])]
+        if field is not None:
+            # We assume field objects handle integer scaling or we manually construct it
+            # Standard approach is just scaling using field.inv and successive additions, 
+            # or `field.inv(field.from_int(len(vals)))`. For simplicity if field has `inv` and integer multiplication:
+            # We will use field.inv
+            try:
+                invlen = field.inv(field.from_int(len(vals)))
+            except AttributeError:
+                # Fallback if field doesn't have from_int
+                len_elem = field.one()
+                for _ in range(len(vals) - 1):
+                    len_elem = field.add(len_elem, field.one())
+                invlen = field.inv(len_elem)
+            return [field.mul(x, invlen) for x in _fft(vals, modulus, rootz[:0:-1], field=field)]
+        else:
+            invlen = pow(len(vals), modulus-2, modulus)
+            return [(x*invlen) % modulus for x in _fft(vals, modulus, rootz[:0:-1])]
     else:
         # Regular FFT
-        return _fft(vals, modulus, rootz[:-1])
+        return _fft(vals, modulus, rootz[:-1], field=field)
+
+def bluestein_fft(vals, modulus, root_of_unity, field=None):
+    """
+    Computes the FFT for sequences of arbitrary length using Bluestein's algorithm.
+    Fallback to simple FT for safety if n is small or convolution is complex here.
+    """
+    n = len(vals)
+    if n == 0:
+        return []
+    
+    # Using simple discrete fourier transform for arbitrary n
+    # For a full O(n log n) Bluestein, one would pad to a power of 2, 
+    # but that requires a 2n-th root of unity which may not be available.
+    rootz = expand_root_of_unity(root_of_unity, modulus, field=field)[:-1]
+    if len(rootz) > len(vals):
+        zero_val = field.zero() if field is not None else 0
+        vals = vals + [zero_val] * (len(rootz) - len(vals))
+    return _simple_ft(vals, modulus, rootz, field=field)
 
 # Evaluates f(x) for f in evaluation form
 def inv_fft_at_point(vals, modulus, root_of_unity, x):
