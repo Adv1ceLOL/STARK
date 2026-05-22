@@ -18,5 +18,17 @@ env.bak/
 venv.bak/
 latex/
 
-# Benchmarking files
-benchmarks/
+# Ignore Rust files in root
+*.rs
+
+# Ignore specific root folders
+Poseidon2/
+Reports (.md)/
+SageFiles/
+diagnostics/
+logs/
+tests/
+visual_tests/
+
+# Ignore gitignore itself
+.gitignore
