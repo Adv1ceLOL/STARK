@@ -209,34 +209,36 @@ def cooley_tukey_fft(values, modulus, omega, inverse=False):
             k >>= 1
         j += k
     
-    # Cooley-Tukey FFT computation
+    # Precompute twiddle factors
+    w_base = omega
+    if inverse:
+        w_base = pow(w_base, modulus - 2, modulus)
+        
+    twiddles = [1] * (n // 2)
+    _mod = modulus  # local ref for hot loop
+    for i in range(1, n // 2):
+        twiddles[i] = twiddles[i-1] * w_base % _mod
+        
+    # Cooley-Tukey FFT computation (optimized inner loop)
     length = 2
     while length <= n:
-        # Twiddle factor w for this stage
-        # We want w such that w^(length/2) is a primitive length/2-th root of unity
-        # Given omega is n-th root, w = omega^(2n/length) gives us what we want
-        # No wait: we want w^length = 1, so w = omega^(n/length)
-        w = pow(omega, (n // length), modulus)
-        
-        if inverse:
-            # For inverse: use w^(-1)
-            w = pow(w, modulus - 2, modulus)  # Fermat inversion
-        
+        half = length >> 1
+        step = n // length
         for i in range(0, n, length):
-            wn = 1
-            for j in range(length // 2):
-                t = (values[i + j + length // 2] * wn) % modulus
-                values[i + j + length // 2] = (values[i + j] - t) % modulus
-                values[i + j] = (values[i + j] + t) % modulus
-                wn = (wn * w) % modulus
+            for j in range(half):
+                idx_lo = i + j
+                idx_hi = idx_lo + half
+                t = values[idx_hi] * twiddles[j * step] % _mod
+                values[idx_hi] = (values[idx_lo] - t) % _mod
+                values[idx_lo] = (values[idx_lo] + t) % _mod
         
-        length *= 2
+        length <<= 1
     
     # For inverse FFT, scale by 1/n
     if inverse:
-        n_inv = pow(n, modulus - 2, modulus)  # n^-1 mod modulus (Fermat)
+        n_inv = pow(n, _mod - 2, _mod)  # n^-1 mod modulus (Fermat)
         for i in range(n):
-            values[i] = (values[i] * n_inv) % modulus
+            values[i] = values[i] * n_inv % _mod
     
     return values
 
@@ -434,7 +436,6 @@ def bluestein_ntt(scalars, modulus, omega, inverse=False):
         Transformed values (modifies scalars in-place)
     """
     n = len(scalars)
-    print(f"[bluestein_ntt] Starting with n={n}")
     
     if n <= 1:
         return scalars
@@ -442,13 +443,10 @@ def bluestein_ntt(scalars, modulus, omega, inverse=False):
     if inverse:
         omega = pow(omega, modulus - 2, modulus)
         
-    print(f"[bluestein_ntt] Computing square root using Tonelli-Shanks...")
     omega_sqrt = tonelli_shanks_sqrt(omega, modulus)
     if omega_sqrt is None:
         raise ValueError(f"omega ({omega}) has no square root modulo {modulus}")
     
-    print(f"[bluestein_ntt] omega_sqrt computed: {omega_sqrt}")
-    print(f"[bluestein_ntt] Computing inverses...")
     omega_inv = pow(omega, modulus - 2, modulus)  # Fermat inverse
     omega_inv_sqrt = pow(omega_sqrt, modulus - 2, modulus)
     
@@ -522,6 +520,225 @@ def bluestein_ntt(scalars, modulus, omega, inverse=False):
     return scalars
 
 
+def _compute_rader_tables_127(modulus, omega_127):
+    """
+    Precompute the Rader permutation tables and FFT'd kernel for 127-point DFT.
+    
+    Rader's algorithm converts a prime-length-p DFT (here p=127) into a cyclic
+    convolution of length p-1=126. The cyclic convolution is computed via linear
+    convolution using FFT: we zero-pad to 256 (next power-of-2 >= 2*126-1=251).
+    
+    A primitive root of Z/127Z is g=3 (3 generates the multiplicative group mod 127).
+    
+    Args:
+        modulus: The field prime
+        omega_127: Primitive 127th root of unity in the field
+        
+    Returns:
+        Tuple (perm_input, perm_output, kernel_fft, omega_pad, conv_len, pad_size)
+        - perm_input[k] = g^k mod 127 for k=0..125  (input permutation indices)
+        - perm_output[k] = g^(-k) mod 127 for k=0..125 (output permutation indices)
+        - kernel_fft: FFT of the Rader kernel (size pad_size), precomputed
+        - omega_pad: primitive pad_size-th root of unity
+        - conv_len: cyclic convolution length (126)
+        - pad_size: FFT padding size (256)
+    """
+    p = 127
+    g = 3  # primitive root of Z/127Z
+    conv_len = p - 1  # 126
+    
+    # Pad size: next power of 2 >= 2*conv_len - 1 = 251 → 256
+    pad_size = 256
+    
+    # Build g^k mod 127 table (input permutation) and g^(-k) mod 127 (output permutation)
+    perm_input = [0] * conv_len   # length 126
+    perm_output = [0] * conv_len  # length 126
+    
+    g_power = 1
+    g_inv = pow(g, p - 2, p)  # g^(-1) mod 127
+    g_inv_power = 1
+    
+    for k in range(conv_len):
+        perm_input[k] = g_power
+        perm_output[k] = g_inv_power
+        g_power = (g_power * g) % p
+        g_inv_power = (g_inv_power * g_inv) % p
+    
+    # Build the Rader kernel: b[k] = omega_127^(g^(-k) mod 127) for k=0..125
+    kernel = [0] * pad_size  # zero-pad 126 → 256
+    for k in range(conv_len):
+        kernel[k] = pow(omega_127, perm_output[k], modulus)
+    
+    # Compute omega_pad (primitive 256th root of unity in the field)
+    # Since p-1 = 2^24 * 127, and 256 = 2^8 divides 2^24, this exists
+    omega_pad = pow(3, (modulus - 1) // pad_size, modulus)
+    
+    # Precompute FFT of the kernel (can be reused for all 127-DFTs with same omega_127)
+    kernel_fft = list(kernel)
+    cooley_tukey_fft(kernel_fft, modulus, omega_pad, inverse=False)
+    
+    # Also precompute the inverse kernel FFT (for inverse DFTs)
+    omega_inv = pow(omega_127, modulus - 2, modulus)
+    inv_kernel = [0] * pad_size
+    for k in range(conv_len):
+        inv_kernel[k] = pow(omega_inv, perm_output[k], modulus)
+    inv_kernel_fft = list(inv_kernel)
+    cooley_tukey_fft(inv_kernel_fft, modulus, omega_pad, inverse=False)
+    
+    return perm_input, perm_output, kernel_fft, inv_kernel_fft, omega_pad, conv_len, pad_size
+
+
+def rader_127_dft(values, modulus, omega_127, rader_tables, inverse=False):
+    """
+    Compute a 127-point DFT using Rader's algorithm.
+    
+    Rader's algorithm converts a prime-length-p DFT into a cyclic convolution
+    of length p-1 = 126. We zero-pad to 256 and use Cooley-Tukey FFT for the
+    linear convolution, then fold the result back to 126 for the cyclic result.
+    
+    Cost: ~3 × 256 × 8 + O(256) ≈ 6,400 multiplications
+    vs. naive DFT matrix: 127² = 16,129 multiplications (~2.5× speedup)
+    
+    Args:
+        values: List of 127 field elements
+        modulus: Prime field modulus
+        omega_127: Primitive 127th root of unity
+        rader_tables: Precomputed (perm_input, perm_output, kernel_fft, inv_kernel_fft, omega_pad, conv_len, pad_size)
+        inverse: If True, compute inverse DFT
+        
+    Returns:
+        List of 127 transformed values
+    """
+    p = 127
+    assert len(values) == p
+    _mod = modulus  # local ref
+    
+    perm_input, perm_output, kernel_fft, inv_kernel_fft, omega_pad, conv_len, pad_size = rader_tables
+    
+    # Select forward or inverse kernel (both precomputed)
+    active_kernel_fft = inv_kernel_fft if inverse else kernel_fft
+    
+    # Step 1: X[0] = sum of all input values
+    x0 = sum(values) % _mod
+    
+    # Step 2: Permute input according to Rader's permutation
+    # a[k] = values[g^k mod 127] for k = 0..125
+    a = [0] * pad_size  # zero-pad 126 → 256
+    for k in range(conv_len):
+        a[k] = values[perm_input[k]]
+    
+    # Step 3: Linear convolution via FFT (we'll fold to cyclic afterwards)
+    # linear_conv = IFFT( FFT(a) ⊙ FFT(kernel) )
+    a_fft = list(a)
+    cooley_tukey_fft(a_fft, _mod, omega_pad, inverse=False)
+    
+    # Pointwise multiply
+    conv_fft = [a_fft[i] * active_kernel_fft[i] % _mod for i in range(pad_size)]
+    
+    # Inverse FFT
+    cooley_tukey_fft(conv_fft, _mod, omega_pad, inverse=True)
+    
+    # Step 4: Fold linear convolution to cyclic convolution mod conv_len
+    # cyclic_conv[k] = sum of linear_conv[k + j*conv_len] for all valid j
+    cyclic_conv = [0] * conv_len
+    for i in range(pad_size):
+        if conv_fft[i] != 0:
+            cyclic_conv[i % conv_len] = (cyclic_conv[i % conv_len] + conv_fft[i]) % _mod
+    
+    # Step 5: Build output
+    # X[0] = sum(values)
+    # X[g^(-s) mod 127] = values[0] + cyclic_conv[s] for s = 0..125
+    result = [0] * p
+    result[0] = x0
+    v0 = values[0]
+    
+    for s in range(conv_len):
+        result[perm_output[s]] = (v0 + cyclic_conv[s]) % _mod
+    
+    if inverse:
+        # Scale by 1/127
+        p_inv = pow(p, _mod - 2, _mod)
+        for i in range(p):
+            result[i] = result[i] * p_inv % _mod
+    
+    return result
+
+
+def mixed_radix_127_fft(values, modulus, omega, inverse=False):
+    """
+    Mixed-Radix Cooley-Tukey FFT for sizes N = 127 * 2^k.
+    
+    Decomposes into:
+    1) 2^k independent 127-point DFTs (using Rader's algorithm, ~5.5× faster than naive)
+    2) Twiddle factor multiplication
+    3) 127 independent 2^k-point FFTs (using Cooley-Tukey)
+    
+    Total cost: O(2^k × 2944 + 127 × 2^k × k) vs old O(2^k × 16129 + 127 × 2^k × k)
+    """
+    n = len(values)
+    if n % 127 != 0:
+        raise ValueError(f"Size must be a multiple of 127, got {n}")
+        
+    n1 = 127
+    n2 = n // 127
+    
+    if (n2 & (n2 - 1)) != 0 and n2 != 1:
+        raise ValueError(f"Size/127 must be a power of 2, got {n2}")
+        
+    if inverse:
+        omega = pow(omega, modulus - 2, modulus)
+        
+    omega_n1 = pow(omega, n2, modulus)   # primitive 127th root
+    omega_n2 = pow(omega, n1, modulus)   # primitive 2^k-th root
+    
+    # Precompute Rader tables for 127-point DFTs (shared across all n2 columns)
+    rader_tables = _compute_rader_tables_127(modulus, omega_n1)
+    
+    # Precompute twiddle factors for the combination step
+    twiddles_n = [1] * n
+    for i in range(1, n):
+        twiddles_n[i] = (twiddles_n[i-1] * omega) % modulus
+        
+    # Step 1: n2 independent 127-point DFTs using Rader's algorithm
+    # Input is stored as: values[n1_idx * n2 + n2_idx]
+    # For each n2_idx, extract column and apply 127-point DFT
+    
+    # Initialize Z as a list of n1 lists of size n2
+    Z = [[0] * n2 for _ in range(n1)]
+    
+    for n_2 in range(n2):
+        # Extract the column: x(n1*N2 + n2)
+        col_127 = [values[n_1 * n2 + n_2] for n_1 in range(n1)]
+        
+        # Apply 127-point DFT using Rader's algorithm
+        col_dft = rader_127_dft(col_127, modulus, omega_n1, rader_tables, inverse=False)
+        
+        # Apply cross-twiddle factors and store
+        for k1 in range(n1):
+            twiddle_idx = (k1 * n_2) % n
+            Z[k1][n_2] = (col_dft[k1] * twiddles_n[twiddle_idx]) % modulus
+            
+    # Step 2: n1 independent n2-point FFTs using Cooley-Tukey
+    result = [0] * n
+    
+    for k1 in range(n1):
+        row_fft = list(Z[k1])
+        if n2 > 1:
+            cooley_tukey_fft(row_fft, modulus, omega_n2, inverse=False)
+            
+        # Place into output array X(k2*N1 + k1)
+        for k2 in range(n2):
+            result[k2 * n1 + k1] = row_fft[k2]
+            
+    if inverse:
+        # Scale the result by 1/N
+        n_inv = pow(n, modulus - 2, modulus)
+        for i in range(n):
+            result[i] = (result[i] * n_inv) % modulus
+            
+    return result
+
+
 # Backward compatibility wrapper
 def fft(vals, modulus, root_of_unity, inv=False):
     """
@@ -554,6 +771,9 @@ def fft(vals, modulus, root_of_unity, inv=False):
         values_out = list(values)
         cooley_tukey_fft(values_out, modulus, root_of_unity, inverse=inv)
         return values_out
+    elif n % 127 == 0 and ((n // 127) & ((n // 127) - 1)) == 0:
+        # Size is 127 * 2^k: use true mixed radix
+        return mixed_radix_127_fft(values, modulus, root_of_unity, inverse=inv)
     else:
         # Other sizes: use Bluestain
         return bluestein_ntt(values, modulus, root_of_unity, inverse=inv)

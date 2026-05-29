@@ -4,7 +4,7 @@ Run this file to step through prove_low_degree and verify_low_degree_proof
 with visible intermediate variables at every stage.
 """
 
-from fft import fft
+from mixed_radix import fft
 from poly_utils import PrimeField
 from permuted_tree import merkelize, mk_branch, verify_branch
 from utils import get_power_cycle, get_pseudorandom_indices

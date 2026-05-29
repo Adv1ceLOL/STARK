@@ -7,13 +7,22 @@ modulus = 2**24 *127 + 1
 
 
 def test_merkletree():
-    t = merkelize([x.to_bytes(32, 'big') for x in range(128)])
+    t = merkelize([x.to_bytes(4, 'big') for x in range(128)])
     b = mk_branch(t, 59)
     assert verify_branch(t[1], 59, b, output_as_int=True) == 59
     print('Merkle tree works')
 
 def fri_proof_bin_length(fri_proof):
-    return sum([32 + bin_length(x[1]) + bin_length(x[2]) for x in fri_proof[:-1]]) + len(b''.join(fri_proof[-1]))
+    total = 0
+    for x in fri_proof[:-1]:
+        if isinstance(x[0], int) and x[0] == 127:
+            # 127-fold step: [127, root, column_branches, poly_branches]
+            total += 32 + bin_length(x[2]) + bin_length(x[3])
+        else:
+            # Standard quartic fold: [root, column_branches, poly_branches]
+            total += 32 + bin_length(x[1]) + bin_length(x[2])
+    total += len(b''.join(fri_proof[-1]))
+    return total
     
 def test_fri():
     # Pure FRI tests

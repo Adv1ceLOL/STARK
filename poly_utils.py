@@ -83,11 +83,12 @@ class PrimeField():
         diff = apos - bpos
         while diff >= 0:
             quot = self.div(a[apos], b[bpos])
-            o.insert(0, quot)
+            o.append(quot)
             for i in range(bpos, -1, -1):
                 a[diff+i] -= b[i] * quot
             apos -= 1
             diff -= 1
+        o.reverse()
         return [x % self.modulus for x in o]
 
     def mod_polys(self, a, b):
@@ -138,6 +139,55 @@ class PrimeField():
                 if nums[i][j] and ys[i]:
                     b[j] += nums[i][j] * yslice
         return [x % self.modulus for x in b]
+
+    def precompute_barycentric_weights(self, xs):
+        """Precompute barycentric weights w_i = 1 / prod_{j!=i}(x_i - x_j).
+        
+        These weights can be reused across multiple evaluations with
+        the same set of x-coordinates, making each evaluation O(n)
+        instead of O(n^2).
+        """
+        n = len(xs)
+        m = self.modulus
+        products = [0] * n
+        for i in range(n):
+            prod = 1
+            xi = xs[i]
+            for j in range(n):
+                if i != j:
+                    prod = prod * (xi - xs[j]) % m
+            products[i] = prod
+        return self.multi_inv(products)
+
+    def barycentric_eval_at(self, xs, ys, x, weights=None):
+        """Evaluate the polynomial interpolating (xs, ys) at point x.
+        
+        Uses the barycentric interpolation formula:
+            p(x) = (sum w_i * y_i / (x - x_i)) / (sum w_i / (x - x_i))
+        
+        This is O(n) per evaluation (vs O(n^2) for lagrange_interp).
+        If weights are precomputed, pass them in to avoid recomputation.
+        """
+        if weights is None:
+            weights = self.precompute_barycentric_weights(xs)
+        n = len(xs)
+        m = self.modulus
+        # Compute (x - x_i) for all i
+        diffs = [(x - xs[i]) % m for i in range(n)]
+        # Handle exact match (x == x_i)
+        for i in range(n):
+            if diffs[i] == 0:
+                return ys[i] % m
+        # Batch-invert all (x - x_i)
+        inv_diffs = self.multi_inv(diffs)
+        # Numerator: sum(w_i * y_i / (x - x_i))
+        num = 0
+        den = 0
+        for i in range(n):
+            term = weights[i] * inv_diffs[i] % m
+            num = (num + term * ys[i]) % m
+            den = (den + term) % m
+        return num * self.inv(den) % m
 
     # Optimized poly evaluation for degree 4
     def eval_quartic(self, p, x):

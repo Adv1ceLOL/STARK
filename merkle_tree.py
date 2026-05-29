@@ -1,12 +1,12 @@
 try:
-    from hashlib import blake2s
+    from hashlib import blake2b
 except:
-    from pyblake2 import blake2s
-blake = lambda x: blake2s(x).digest()
+    from pyblake2 import blake2b
+blake = lambda x: blake2b(x, digest_size=32).digest()
 
 def merkelize(L):
     # L = permute4(L)
-    nodes = [b''] * len(L) + [x.to_bytes(32, 'big') if isinstance(x, int) else x for x in L]
+    nodes = [b''] * len(L) + [x.to_bytes(4, 'big') if isinstance(x, int) else x for x in L]
     for i in range(len(L) - 1, 0, -1):
         nodes[i] = blake(nodes[i*2] + nodes[i*2+1])
     return nodes
