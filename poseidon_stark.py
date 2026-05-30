@@ -8,7 +8,7 @@ from utils import get_power_cycle, get_pseudorandom_indices, is_a_power_of_2
 from poseidon1 import poseidon1, ROUND_CONSTANTS, MATRIX_FULL, DEFAULT_RF, DEFAULT_RP, DEFAULT_ALPHA, P, mat_vec_mul
 
 # Single modulus for all operations (Koala modulus)
-modulus = 2**31 - 1
+modulus = 2**31 - 2**24 + 1
 
 f = PrimeField(modulus)
 nonresidue = 3  # Better primitive root for this modulus than 7

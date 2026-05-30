@@ -17,3 +17,40 @@ ENV/
 env.bak/
 venv.bak/
 latex/
+.vscode/
+
+# Ignore Rust files in root
+*.rs
+
+# Ignore specific root folders
+Reports (.md)/
+SageFiles/
+diagnostics/
+logs/
+tests/
+visual_tests/
+
+# Ignore gitignore itself
+.gitignore
+latex/
+
+# Ignore .md files
+*.md
+
+# Ignore testing files
+debug_rc.py
+fix.py  
+scratch_barycentric.py
+test_rader.py
+
+# Rust ignores
+/Rust - Blue/stark_prover/target/
+**/target/
+Cargo.lock
+rustup-init.exe
+**/*.rs.bk
+Cargo.*
+config.*
+LICENSE*
+
+*.txt

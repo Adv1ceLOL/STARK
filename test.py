@@ -1,5 +1,5 @@
 from fft import fft
-from poseidon2_stark import mk_poseidon2_proof, verify_poseidon2_proof
+from poseidon_stark import mk_poseidon_proof, verify_poseidon_proof
 from merkle_tree import merkelize, mk_branch, verify_branch, bin_length
 from fri import prove_low_degree, verify_low_degree_proof
 
@@ -40,20 +40,20 @@ def test_fri():
 def test_stark():
     import sys
     LOGSTEPS = int(sys.argv[1]) if len(sys.argv) > 1 else 13
-    # Full STARK test with Poseidon2
+    # Full STARK test with Poseidon1
     INPUT = 3
-    proof = mk_poseidon2_proof(INPUT, 2**LOGSTEPS)
+    proof = mk_poseidon_proof(INPUT, 2**LOGSTEPS)
     m_root, l_root, main_branches, linear_comb_branches, fri_proof = proof
     L1 = bin_length(main_branches) + bin_length(linear_comb_branches)
     L2 = fri_proof_bin_length(fri_proof)
     print("Approx proof length: %d (branches), %d (FRI proof), %d (total)" % (L1, L2, L1 + L2))
-    # Compute the output correctly by applying Poseidon2
-    from poseidon2_stark import poseidon2_full_state, DEFAULT_RF, DEFAULT_RP
+    # Compute the output correctly by applying Poseidon1
+    from poseidon_stark import poseidon_full_state, DEFAULT_RF, DEFAULT_RP
     valid_steps = ((2**LOGSTEPS - 1) // (DEFAULT_RF + DEFAULT_RP)) * (DEFAULT_RF + DEFAULT_RP)
-    final_state = poseidon2_full_state(INPUT, valid_steps)
+    final_state = poseidon_full_state(INPUT, valid_steps)
     output = final_state[0]
     print(f"Debug Output: {output}")
-    assert verify_poseidon2_proof(INPUT, 2**LOGSTEPS, output, proof)
+    assert verify_poseidon_proof(INPUT, 2**LOGSTEPS, output, proof)
 
 if __name__ == '__main__':
     test_stark()

@@ -1,6 +1,6 @@
 import argparse
 
-P = 2**31 - 1
+P = 2**31 - 2**24 + 1
 DEFAULT_RF = 8
 DEFAULT_RP = 20
 DEFAULT_ALPHA = 3
@@ -105,7 +105,8 @@ def poseidon1(
 		state_words[:] = mat_vec_mul(matrix_full, state_words, modulus)
 
 	def partial_round() -> None:
-		state_words[0] = (state_words[0] + next(rc_iter)) % modulus
+		for i in range(len(state_words)):
+			state_words[i] = (state_words[i] + next(rc_iter)) % modulus
 		state_words[0] = pow(state_words[0], alpha, modulus)
 		state_words[:] = mat_vec_mul(matrix_full, state_words, modulus)
 	
